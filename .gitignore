@@ -1,0 +1,24 @@
+# === Visual Studio & .NET ===
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.slnx.sqlite
+ProjectSettings.json
+VSWorkspaceState.json
+
+logs.txt*
+*.log
+.cache/
+
+AeroLink.Android/
+AeroLink.Android.Core/
+
+
+aerolinkwg-go/amneziawg.exe
+aerolinkwg-go/amneziawg-linux
+aerolinkwg-go/amnezia-*
+aerolinkwg-go/xray*
+aerolinkwg-go/*.aar
+aerolinkwg-go/*.jar

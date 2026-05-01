@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "AeroLink": {
+      "commandName": "Project",
+      "workingDirectory": "E:\\"
+    }
+  }
+}
