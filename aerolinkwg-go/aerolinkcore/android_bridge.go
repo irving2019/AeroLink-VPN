@@ -9,16 +9,18 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"syscall"
 
-	"github.com/amnezia-vpn/amneziawg-go/conn"
-	"github.com/amnezia-vpn/amneziawg-go/device"
-	"github.com/amnezia-vpn/amneziawg-go/tun"
+	"github.com/AeroLink/aerolinkwg-go/conn"
+	"github.com/AeroLink/aerolinkwg-go/device"
+	"github.com/AeroLink/aerolinkwg-go/tun"
 )
 
 // --- НАШ СОБСТВЕННЫЙ АНДРОИД-ТУННЕЛЬ ---
 type androidTun struct {
 	file   *os.File
 	events chan tun.Event
+	mtu    int
 }
 
 func (t *androidTun) File() *os.File { return t.file }
@@ -43,7 +45,7 @@ func (t *androidTun) Write(bufs [][]byte, offset int) (int, error) {
 }
 
 func (t *androidTun) Flush() error             { return nil }
-func (t *androidTun) MTU() (int, error)        { return 1280, nil }
+func (t *androidTun) MTU() (int, error)        { return t.mtu, nil }
 func (t *androidTun) Name() (string, error)    { return "AeroLink", nil }
 func (t *androidTun) Events() <-chan tun.Event { return t.events }
 func (t *androidTun) Close() error {
@@ -120,13 +122,16 @@ func parseToUAPI(configText string) string {
 			for _, ip := range ips {
 				allowedIps = append(allowedIps, strings.TrimSpace(ip))
 			}
-		case "jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4":
+		case "jc", "jmin", "jmax", "s1", "s2", "s3", "s4":
 			// Вытаскиваем только ПЕРВОЕ число, отсекая дефисы и мусор
 			cleanNum := numRegex.FindString(val)
 			if cleanNum != "" {
 				awgParams = append(awgParams, fmt.Sprintf("%s=%s\n", key, cleanNum))
 			}
-		// Все остальные ключи (s3, s4, i1 и т.д.) просто пролетят мимо и не сломают ядро
+		case "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4":
+			if val != "" {
+				awgParams = append(awgParams, fmt.Sprintf("%s=%s\n", key, val))
+			}
 		}
 	}
 
@@ -166,22 +171,43 @@ func parseToUAPI(configText string) string {
 func StartVPN(fd int, configText string) string {
 	fmt.Printf("AeroLink Core: Инициализация кастомного туннеля. FD: %d\n", fd)
 
+	err := syscall.SetNonblock(fd, true)
+	if err != nil {
+		return "ERROR: SetNonblock failed - " + err.Error()
+	}
+
 	tunFile := os.NewFile(uintptr(fd), "tun")
 	if tunFile == nil {
 		return "ERROR: Bad File Descriptor"
 	}
 
+	// Parse MTU from configText
+	mtu := 1420
+	for _, line := range strings.Split(configText, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), "mtu") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				var parsedMtu int
+				if _, err := fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &parsedMtu); err == nil && parsedMtu > 0 {
+					mtu = parsedMtu
+				}
+			}
+		}
+	}
+
 	tunDevice := &androidTun{
 		file:   tunFile,
 		events: make(chan tun.Event, 1),
+		mtu:    mtu,
 	}
 	tunDevice.events <- tun.EventUp
 
-	logger := device.NewLogger(device.LogLevelVerbose, "AeroLinkCore")
+	logger := device.NewLogger(device.LogLevelError, "AeroLinkCore")
 	wgDevice = device.NewDevice(tunDevice, conn.NewDefaultBind(), logger)
 
 	uapiConfig := parseToUAPI(configText)
-	err := wgDevice.IpcSet(uapiConfig)
+	err = wgDevice.IpcSet(uapiConfig)
 	if err != nil {
 		return "ERROR: IpcSet failed - " + err.Error()
 	}
@@ -200,4 +226,20 @@ func StopVPN() string {
 		wgDevice = nil
 	}
 	return "STOPPED"
+}
+
+func GetSocketFds() string {
+	if wgDevice == nil {
+		return ""
+	}
+	var fds []string
+	if binder, ok := wgDevice.Bind().(conn.PeekLookAtSocketFd); ok {
+		if fd, err := binder.PeekLookAtSocketFd4(); err == nil && fd != -1 {
+			fds = append(fds, fmt.Sprintf("%d", fd))
+		}
+		if fd, err := binder.PeekLookAtSocketFd6(); err == nil && fd != -1 {
+			fds = append(fds, fmt.Sprintf("%d", fd))
+		}
+	}
+	return strings.Join(fds, ",")
 }

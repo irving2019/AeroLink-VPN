@@ -8,11 +8,17 @@
 package main
 
 import (
+	"bufio"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/AeroLink/aerolinkwg-go/conn"
 	"github.com/AeroLink/aerolinkwg-go/device"
@@ -93,6 +99,17 @@ func main() {
 
 	if !foreground {
 		foreground = os.Getenv(ENV_WG_PROCESS_FOREGROUND) == "1"
+	}
+
+	isConfigFile := false
+	var configText string
+	if info, err := os.Stat(interfaceName); err == nil && !info.IsDir() {
+		content, err := os.ReadFile(interfaceName)
+		if err == nil {
+			isConfigFile = true
+			configText = string(content)
+			interfaceName = "aerolink"
+		}
 	}
 
 	// get log level (default: info)
@@ -226,6 +243,21 @@ func main() {
 
 	logger.Verbosef("Device started")
 
+	if isConfigFile {
+		uapiConfig := parseToUAPI(configText)
+		err = device.IpcSet(uapiConfig)
+		if err != nil {
+			logger.Errorf("Failed to set UAPI config: %v", err)
+			os.Exit(ExitSetupFailed)
+		}
+		err = device.Up()
+		if err != nil {
+			logger.Errorf("Failed to bring up device: %v", err)
+			os.Exit(ExitSetupFailed)
+		}
+		logger.Verbosef("Device configured and brought up from config file")
+	}
+
 	errs := make(chan error)
 	term := make(chan os.Signal, 1)
 
@@ -265,4 +297,108 @@ func main() {
 	device.Close()
 
 	logger.Verbosef("Shutting down")
+}
+
+func toHex(b64 string) string {
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(dec)
+}
+
+func parseToUAPI(configText string) string {
+	var privateKey, publicKey, endpoint, presharedKey, keepalive string
+	var allowedIps []string
+	var awgParams []string
+
+	numRegex := regexp.MustCompile(`-?\d+`)
+
+	scanner := bufio.NewScanner(strings.NewReader(configText))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		val := strings.TrimSpace(parts[1])
+
+		if val == "" {
+			continue
+		}
+
+		switch key {
+		case "privatekey":
+			privateKey = toHex(val)
+		case "publickey":
+			publicKey = toHex(val)
+		case "presharedkey":
+			presharedKey = toHex(val)
+		case "endpoint":
+			host, port, err := net.SplitHostPort(val)
+			if err == nil {
+				ips, err := net.LookupIP(host)
+				if err == nil && len(ips) > 0 {
+					endpoint = net.JoinHostPort(ips[0].String(), port)
+				} else {
+					endpoint = val
+				}
+			} else {
+				endpoint = val
+			}
+		case "persistentkeepalive":
+			keepalive = val
+		case "allowedips":
+			ips := strings.Split(val, ",")
+			for _, ip := range ips {
+				allowedIps = append(allowedIps, strings.TrimSpace(ip))
+			}
+		case "jc", "jmin", "jmax", "s1", "s2", "s3", "s4":
+			cleanNum := numRegex.FindString(val)
+			if cleanNum != "" {
+				awgParams = append(awgParams, fmt.Sprintf("%s=%s\n", key, cleanNum))
+			}
+		case "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4":
+			if val != "" {
+				awgParams = append(awgParams, fmt.Sprintf("%s=%s\n", key, val))
+			}
+		}
+	}
+
+	var uapi strings.Builder
+
+	if privateKey != "" {
+		uapi.WriteString(fmt.Sprintf("private_key=%s\n", privateKey))
+	}
+
+	for _, p := range awgParams {
+		uapi.WriteString(p)
+	}
+
+	uapi.WriteString("replace_peers=true\n")
+
+	if publicKey != "" {
+		uapi.WriteString(fmt.Sprintf("public_key=%s\n", publicKey))
+		if endpoint != "" {
+			uapi.WriteString(fmt.Sprintf("endpoint=%s\n", endpoint))
+		}
+		if presharedKey != "" {
+			uapi.WriteString(fmt.Sprintf("preshared_key=%s\n", presharedKey))
+		}
+		if keepalive != "" {
+			uapi.WriteString(fmt.Sprintf("persistent_keepalive_interval=%s\n", keepalive))
+		}
+		for _, ip := range allowedIps {
+			uapi.WriteString(fmt.Sprintf("allowed_ip=%s\n", ip))
+		}
+	}
+
+	return uapi.String()
 }
