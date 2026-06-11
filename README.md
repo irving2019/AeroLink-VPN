@@ -2,6 +2,7 @@
 
 ![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
+![Android](https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white)
 ![.NET](https://img.shields.io/badge/.NET%2010.0-512BD4?style=for-the-badge&logo=dotnet&logoColor=white)
 ![Avalonia UI](https://img.shields.io/badge/Avalonia%20UI-171717?style=for-the-badge&logo=avalonia&logoColor=white)
 ![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)
@@ -18,7 +19,7 @@
 -  **Поддержка VLESS/Xray:** Встроенный парсер ссылок (формата `vpn://` / `vless://`) и управление Xray-ядром.
 -  **Умный DNS-резолвинг:** Встроенная в Go-ядро система разрешения доменных имен для конечных точек (Endpoints), предотвращающая сбои при нестандартных конфигурациях серверов.
 -  **Современный UI:** Красивый и отзывчивый интерфейс, построенный на базе фреймворка [Avalonia UI](https://avaloniaui.net/).
--  **Кроссплатформенность:** Полноценная поддержка Windows и Linux (поддержка macOS и Android находится в стадии разработки).
+-  **Кроссплатформенность:** Полноценная поддержка Windows, Linux и Android (поддержка macOS находится в стадии разработки).
 
 ---
 
@@ -36,9 +37,14 @@
    ```bash
    sudo dpkg -i aerolink-linux-v1.0.0.deb
    sudo apt-get install -f # Если потребуются зависимости
-3.Запустите приложение из меню приложений или через консоль.
+   ```
+3. Запустите приложение из меню приложений или через консоль.
+> **Важно:** Ядру VPN требуются права суперпользователя (root) для маршрутизации трафика и работы с TUN-интерфейсом.
 
-Важно: Ядру VPN требуются права суперпользователя (root) для маршрутизации трафика и работы с TUN-интерфейсом.
+### Для Android
+1. Скачайте `AeroLink.apk` из раздела [Releases](../../releases).
+2. Установите APK-файл на устройство, при необходимости разрешив установку из неизвестных источников в настройках безопасности.
+3. Запустите приложение и подтвердите запрос системы на создание VPN-соединения.
 
  Сборка из исходников (Для разработчиков)
 Если вы хотите собрать проект самостоятельно, вам понадобятся:
@@ -65,9 +71,9 @@ dotnet publish -c Release -r linux-x64 --self-contained true # Для Linux
 Убедитесь, что бинарные файлы ядер (amneziawg, xray, wintun.dll и файлы гео-данных) находятся в папке Core рядом с исполняемым файлом UI.
 
  Известные ограничения (WIP)
-Android / macOS: Мобильная и яблочная версии приложения в данный момент находятся в активной разработке. Присутствуют нюансы работы с системными API для поднятия TUN-интерфейса.
+macOS: Версия под macOS в данный момент находится в активной разработке. Присутствуют нюансы работы с системными API для поднятия TUN-интерфейса.
 
-Требование Root/Admin: На текущем этапе архитектура ядер требует повышенных привилегий при каждом запуске туннеля.
+Требование Root/Admin: На текущем этапе архитектура десктопных ядер требует повышенных привилегий при каждом запуске туннеля (Администратор для Windows / Root для Linux). Android версия работает без root-прав через стандартный Android VpnService.
 
  Автор
 Vladimir Pilipenko — C#/.NET Developer
