@@ -1,0 +1,404 @@
+//go:build !windows
+
+/* SPDX-License-Identifier: MIT
+ *
+ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
+ */
+
+package main
+
+import (
+	"bufio"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+
+	"github.com/AeroLink/aerolinkwg-go/conn"
+	"github.com/AeroLink/aerolinkwg-go/device"
+	"github.com/AeroLink/aerolinkwg-go/ipc"
+	"github.com/AeroLink/aerolinkwg-go/tun"
+	"golang.org/x/sys/unix"
+)
+
+const (
+	ExitSetupSuccess = 0
+	ExitSetupFailed  = 1
+)
+
+const (
+	ENV_WG_TUN_FD             = "WG_TUN_FD"
+	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
+	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
+)
+
+func printUsage() {
+	fmt.Printf("Usage: %s [-f/--foreground] INTERFACE-NAME\n", os.Args[0])
+}
+
+func warning() {
+	switch runtime.GOOS {
+	case "linux", "freebsd", "openbsd":
+		if os.Getenv(ENV_WG_PROCESS_FOREGROUND) == "1" {
+			return
+		}
+	default:
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "┌──────────────────────────────────────────────────────────────┐")
+	fmt.Fprintln(os.Stderr, "│                                                              │")
+	fmt.Fprintln(os.Stderr, "│       Running amneziawg-go is not required because this      │")
+	fmt.Fprintln(os.Stderr, "│       kernel has first class support for AmneziaWG. For      │")
+	fmt.Fprintln(os.Stderr, "│       information on installing the kernel module,           │")
+	fmt.Fprintln(os.Stderr, "│       please visit:                                          │")
+	fmt.Fprintln(os.Stderr, "| https://github.com/amnezia-vpn/amneziawg-linux-kernel-module │")
+	fmt.Fprintln(os.Stderr, "│                                                              │")
+	fmt.Fprintln(os.Stderr, "└──────────────────────────────────────────────────────────────┘")
+}
+
+func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Printf("amneziawg-go %s\n\nUserspace AmneziaWG daemon for %s-%s.\nInformation available at https://amnezia.org\n", Version, runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
+	warning()
+
+	var foreground bool
+	var interfaceName string
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		printUsage()
+		return
+	}
+
+	switch os.Args[1] {
+
+	case "-f", "--foreground":
+		foreground = true
+		if len(os.Args) != 3 {
+			printUsage()
+			return
+		}
+		interfaceName = os.Args[2]
+
+	default:
+		foreground = false
+		if len(os.Args) != 2 {
+			printUsage()
+			return
+		}
+		interfaceName = os.Args[1]
+	}
+
+	if !foreground {
+		foreground = os.Getenv(ENV_WG_PROCESS_FOREGROUND) == "1"
+	}
+
+	isConfigFile := false
+	var configText string
+	if info, err := os.Stat(interfaceName); err == nil && !info.IsDir() {
+		content, err := os.ReadFile(interfaceName)
+		if err == nil {
+			isConfigFile = true
+			configText = string(content)
+			interfaceName = "aerolink"
+		}
+	}
+
+	// get log level (default: info)
+
+	logLevel := func() int {
+		switch os.Getenv("LOG_LEVEL") {
+		case "verbose", "debug":
+			return device.LogLevelVerbose
+		case "error":
+			return device.LogLevelError
+		case "silent":
+			return device.LogLevelSilent
+		}
+		return device.LogLevelError
+	}()
+
+	// open TUN device (or use supplied fd)
+
+	tdev, err := func() (tun.Device, error) {
+		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
+		if tunFdStr == "" {
+			return tun.CreateTUN(interfaceName, device.DefaultMTU)
+		}
+
+		// construct tun device from supplied fd
+
+		fd, err := strconv.ParseUint(tunFdStr, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		err = unix.SetNonblock(int(fd), true)
+		if err != nil {
+			return nil, err
+		}
+
+		file := os.NewFile(uintptr(fd), "")
+		return tun.CreateTUNFromFile(file, device.DefaultMTU)
+	}()
+
+	if err == nil {
+		realInterfaceName, err2 := tdev.Name()
+		if err2 == nil {
+			interfaceName = realInterfaceName
+		}
+	}
+
+	logger := device.NewLogger(
+		logLevel,
+		fmt.Sprintf("(%s) ", interfaceName),
+	)
+
+	logger.Verbosef("Starting amneziawg-go version %s", Version)
+
+	if err != nil {
+		logger.Errorf("Failed to create TUN device: %v", err)
+		os.Exit(ExitSetupFailed)
+	}
+
+	// open UAPI file (or use supplied fd)
+
+	fileUAPI, err := func() (*os.File, error) {
+		uapiFdStr := os.Getenv(ENV_WG_UAPI_FD)
+		if uapiFdStr == "" {
+			return ipc.UAPIOpen(interfaceName)
+		}
+
+		// use supplied fd
+
+		fd, err := strconv.ParseUint(uapiFdStr, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		return os.NewFile(uintptr(fd), ""), nil
+	}()
+	if err != nil {
+		logger.Errorf("UAPI listen error: %v", err)
+		os.Exit(ExitSetupFailed)
+		return
+	}
+	// daemonize the process
+
+	if !foreground {
+		env := os.Environ()
+		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
+		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
+		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND))
+		files := [3]*os.File{}
+		if os.Getenv("LOG_LEVEL") != "" && logLevel != device.LogLevelSilent {
+			files[0], _ = os.Open(os.DevNull)
+			files[1] = os.Stdout
+			files[2] = os.Stderr
+		} else {
+			files[0], _ = os.Open(os.DevNull)
+			files[1], _ = os.Open(os.DevNull)
+			files[2], _ = os.Open(os.DevNull)
+		}
+		attr := &os.ProcAttr{
+			Files: []*os.File{
+				files[0], // stdin
+				files[1], // stdout
+				files[2], // stderr
+				tdev.File(),
+				fileUAPI,
+			},
+			Dir: ".",
+			Env: env,
+		}
+
+		path, err := os.Executable()
+		if err != nil {
+			logger.Errorf("Failed to determine executable: %v", err)
+			os.Exit(ExitSetupFailed)
+		}
+
+		process, err := os.StartProcess(
+			path,
+			os.Args,
+			attr,
+		)
+		if err != nil {
+			logger.Errorf("Failed to daemonize: %v", err)
+			os.Exit(ExitSetupFailed)
+		}
+		process.Release()
+		return
+	}
+
+	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+
+	logger.Verbosef("Device started")
+
+	if isConfigFile {
+		uapiConfig := parseToUAPI(configText)
+		err = device.IpcSet(uapiConfig)
+		if err != nil {
+			logger.Errorf("Failed to set UAPI config: %v", err)
+			os.Exit(ExitSetupFailed)
+		}
+		err = device.Up()
+		if err != nil {
+			logger.Errorf("Failed to bring up device: %v", err)
+			os.Exit(ExitSetupFailed)
+		}
+		logger.Verbosef("Device configured and brought up from config file")
+	}
+
+	errs := make(chan error)
+	term := make(chan os.Signal, 1)
+
+	uapi, err := ipc.UAPIListen(interfaceName, fileUAPI)
+	if err != nil {
+		logger.Errorf("Failed to listen on uapi socket: %v", err)
+		os.Exit(ExitSetupFailed)
+	}
+
+	go func() {
+		for {
+			conn, err := uapi.Accept()
+			if err != nil {
+				errs <- err
+				return
+			}
+			go device.IpcHandle(conn)
+		}
+	}()
+
+	logger.Verbosef("UAPI listener started")
+
+	// wait for program to terminate
+
+	signal.Notify(term, unix.SIGTERM)
+	signal.Notify(term, os.Interrupt)
+
+	select {
+	case <-term:
+	case <-errs:
+	case <-device.Wait():
+	}
+
+	// clean up
+
+	uapi.Close()
+	device.Close()
+
+	logger.Verbosef("Shutting down")
+}
+
+func toHex(b64 string) string {
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(dec)
+}
+
+func parseToUAPI(configText string) string {
+	var privateKey, publicKey, endpoint, presharedKey, keepalive string
+	var allowedIps []string
+	var awgParams []string
+
+	numRegex := regexp.MustCompile(`-?\d+`)
+
+	scanner := bufio.NewScanner(strings.NewReader(configText))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		val := strings.TrimSpace(parts[1])
+
+		if val == "" {
+			continue
+		}
+
+		switch key {
+		case "privatekey":
+			privateKey = toHex(val)
+		case "publickey":
+			publicKey = toHex(val)
+		case "presharedkey":
+			presharedKey = toHex(val)
+		case "endpoint":
+			host, port, err := net.SplitHostPort(val)
+			if err == nil {
+				ips, err := net.LookupIP(host)
+				if err == nil && len(ips) > 0 {
+					endpoint = net.JoinHostPort(ips[0].String(), port)
+				} else {
+					endpoint = val
+				}
+			} else {
+				endpoint = val
+			}
+		case "persistentkeepalive":
+			keepalive = val
+		case "allowedips":
+			ips := strings.Split(val, ",")
+			for _, ip := range ips {
+				allowedIps = append(allowedIps, strings.TrimSpace(ip))
+			}
+		case "jc", "jmin", "jmax", "s1", "s2", "s3", "s4":
+			cleanNum := numRegex.FindString(val)
+			if cleanNum != "" {
+				awgParams = append(awgParams, fmt.Sprintf("%s=%s\n", key, cleanNum))
+			}
+		case "h1", "h2", "h3", "h4", "i1", "i2", "i3", "i4":
+			if val != "" {
+				awgParams = append(awgParams, fmt.Sprintf("%s=%s\n", key, val))
+			}
+		}
+	}
+
+	var uapi strings.Builder
+
+	if privateKey != "" {
+		uapi.WriteString(fmt.Sprintf("private_key=%s\n", privateKey))
+	}
+
+	for _, p := range awgParams {
+		uapi.WriteString(p)
+	}
+
+	uapi.WriteString("replace_peers=true\n")
+
+	if publicKey != "" {
+		uapi.WriteString(fmt.Sprintf("public_key=%s\n", publicKey))
+		if endpoint != "" {
+			uapi.WriteString(fmt.Sprintf("endpoint=%s\n", endpoint))
+		}
+		if presharedKey != "" {
+			uapi.WriteString(fmt.Sprintf("preshared_key=%s\n", presharedKey))
+		}
+		if keepalive != "" {
+			uapi.WriteString(fmt.Sprintf("persistent_keepalive_interval=%s\n", keepalive))
+		}
+		for _, ip := range allowedIps {
+			uapi.WriteString(fmt.Sprintf("allowed_ip=%s\n", ip))
+		}
+	}
+
+	return uapi.String()
+}
