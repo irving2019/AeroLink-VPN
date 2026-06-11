@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" android:installLocation="auto">
+	<!-- Essential VPN permissions -->
+	<uses-permission android:name="android.permission.INTERNET" />
+	<uses-permission android:name="android.permission.BIND_VPN_SERVICE" />
+	<uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+	<!-- Foreground service permission (Android 12+) -->
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTIVITY" />
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+	<!-- Notifications permission (Android 13+) -->
+	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+	<!-- Boot permissions -->
+	<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+	<!-- Network monitoring -->
+	<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+	<!-- Disable app optimizations -->
+	<uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+	<application android:label="AeroLink" android:icon="@drawable/icon">
+		<service android:name="com.CompanyName.AeroLink.AeroLinkVpnService"
+				 android:permission="android.permission.BIND_VPN_SERVICE"
+				 android:exported="true"
+				 android:foregroundServiceType="specialUse">
+			<intent-filter>
+				<action android:name="android.net.VpnService" />
+			</intent-filter>
+			<property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="vpn" />
+		</service>
+	</application>
+</manifest>

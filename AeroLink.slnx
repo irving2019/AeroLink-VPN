@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="AeroLink.Android.Core/AeroLink.Android.Core.csproj" Id="c49683dc-9346-4561-9ea9-a1b78dfad69d" />
+  <Project Path="AeroLink.Android/AeroLink.Android.csproj">
+    <Deploy Solution="Debug|*" />
+  </Project>
+  <Project Path="AeroLink/AeroLink.csproj" />
+</Solution>
